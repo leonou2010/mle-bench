@@ -25,18 +25,25 @@ ARG OD_VERSION=v2.1.0
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN mkdir -p ${LOGS_DIR} ${AGENT_DIR} ${CODE_DIR} ${SUBMISSION_DIR} && \
-    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && \
-    chmod 700 /tmp/get-docker.sh && \
-    /tmp/get-docker.sh && \
-    sudo usermod -aG docker nonroot && \
+    apt-get update && \
+    apt-get install -y ca-certificates curl && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
+    chmod a+r /etc/apt/keyrings/docker.asc && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+    tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+    apt-get update && \
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && \
+    usermod -aG docker nonroot && \
     git clone --branch ${OD_VERSION} --single-branch https://github.com/thesofakillers/OpenHands.git ${AGENT_DIR}
 
 WORKDIR ${AGENT_DIR}
 
-# Assumes that the `agent` conda env already exists, which is created in the `mlebench-env` base image.
 RUN conda install -y -n ${CONDA_ENV_NAME} -c conda-forge nodejs=18.17.1 && \
     conda run -n ${CONDA_ENV_NAME} pip install poetry>=1.8 && \
     conda run -n ${CONDA_ENV_NAME} poetry install && \
+    conda run -n ${CONDA_ENV_NAME} pip install --upgrade packaging && \
     conda run -n ${CONDA_ENV_NAME} poetry add build && \
     conda clean -afy
 
