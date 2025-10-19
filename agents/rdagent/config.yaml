@@ -1,0 +1,43 @@
+vars:
+  step_count: &step_count 500
+  time_limit: &time_limit 900 # 15 minutes
+
+defaults: &defaults
+  start: rdagent/start.sh
+  dockerfile: rdagent/Dockerfile
+  kwargs_type: null  # RD-Agent uses environment variables, not CLI kwargs
+  env_vars: &env_vars
+    TIME_LIMIT_SECS: *time_limit
+    STEP_LIMIT: *step_count
+
+rdagent:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    # RD-Agent specific environment variables
+    CHAT_MODEL: gpt-4o
+    EMBEDDING_MODEL: text-embedding-3-small
+    # Data science scenario settings
+    DS_LOCAL_DATA_PATH: /home/data
+    DS_CODER_ON_WHOLE_PIPELINE: "True"
+    DS_IF_USING_MLE_DATA: "True"
+    DS_SAMPLE_DATA_BY_LLM: "False"
+    DS_SCEN: rdagent.scenarios.data_science.scen.DataScienceScen
+    # Disable Docker requirement for MLE-bench compatibility
+    DS_ENV_TYPE: "LocalPythonEnv"
+
+rdagent/dev:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    CHAT_MODEL: gpt-4o
+    EMBEDDING_MODEL: text-embedding-3-small
+    DS_LOCAL_DATA_PATH: /home/data
+    DS_CODER_ON_WHOLE_PIPELINE: "True"
+    DS_IF_USING_MLE_DATA: "True"
+    DS_SAMPLE_DATA_BY_LLM: "False"
+    DS_SCEN: rdagent.scenarios.data_science.scen.DataScienceScen
