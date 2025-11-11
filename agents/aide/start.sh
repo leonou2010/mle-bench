@@ -81,7 +81,7 @@ ln -s ${LOGS_DIR} ${AGENT_DIR}/logs/exp
 ln -s ${CODE_DIR} ${AGENT_DIR}/workspaces/exp/best_solution
 ln -s ${SUBMISSION_DIR} ${AGENT_DIR}/workspaces/exp/best_submission
 
-# run with timeout, and print if timeout occurs
+# run with timeout, and print if timeout occurs, this is a run call
 timeout $TIME_LIMIT_SECS aide data_dir="/home/data/" desc_file="${AGENT_DIR}/full_instructions.txt" \
   exp_name="exp" \
   $@ # forward the bash arguments to aide
