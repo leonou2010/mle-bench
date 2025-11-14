@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     python-is-python3 \
     build-essential \
+    strace \
     openssh-server \
     tmux \
     gettext \
@@ -55,6 +56,7 @@ RUN if [ "$INSTALL_HEAVY_DEPENDENCIES" = "true" ]; then \
     /opt/conda/bin/conda run -n ${CONDA_ENV_NAME} pip install -r /tmp/requirements.txt && \
     /opt/conda/bin/conda run -n ${CONDA_ENV_NAME} pip install tensorflow[and-cuda]==2.17 && \
     /opt/conda/bin/conda run -n ${CONDA_ENV_NAME} pip install torch==2.2.0 torchaudio==2.2.0 torchtext==0.17.0 torchvision==0.17.0 && \
+    /opt/conda/bin/conda run -n ${CONDA_ENV_NAME} pip install coverage && \
     /opt/conda/bin/conda clean -afy ; fi
 
 ENV PATH="/opt/conda/bin:${PATH}"

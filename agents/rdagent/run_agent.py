@@ -17,6 +17,7 @@ behaviour further, but the overall shape should feel familiar.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -52,6 +53,68 @@ logging.basicConfig(level=logging.INFO)
 MLE_DESCRIPTION_CACHE: Dict[str, str] = {}
 _ORIGINAL_GET_DESCRIPTION = DataScienceScen._get_description
 _INSTRUCTIONS_PATH: Optional[Path] = None
+
+
+def _patch_rdagent_env_to_local_agent(context: RuntimeContext) -> None:
+    """Force RD-Agent to use the local conda env inside the MLE container.
+
+    This avoids nested Docker and ensures commands like `python -m coverage` and
+    tools like `strace` resolve correctly within the prebuilt `agent` environment.
+    """
+    try:
+        # Import the components module that actually provides get_ds_env used by the scen
+        import rdagent.components.coder.data_science.conf as coder_conf_mod  # type: ignore
+        from rdagent.utils.env import LocalEnv, MLECondaConf  # type: ignore
+
+        # If Docker is available and not explicitly disabled, keep default Docker env.
+        force_local = os.environ.get("RDAGENT_FORCE_LOCAL_ENV", "0") == "1"
+        if not force_local:
+            try:
+                import docker  # type: ignore
+
+                client = docker.from_env()
+                client.ping()
+                # Docker reachable: do not patch, use default Docker env
+                return
+            except Exception:
+                # Docker not available -> fall back to local patch
+                pass
+
+        conda_env_name = os.environ.get("CONDA_ENV_NAME", "agent")
+
+        def _mle_get_ds_env(
+            conf_type: str = "mlebench",
+            extra_volumes: dict = {},
+            running_timeout_period: Optional[int] = None,
+            enable_cache: Optional[bool] = None,
+        ):
+            conf = MLECondaConf(conda_env_name=conda_env_name)
+
+            # FIX: Override bin_path with correct conda environment PATH
+            # This ensures LocalEnv uses conda Python instead of system Python
+            conda_env_bin = f"/opt/conda/envs/{conda_env_name}/bin"
+            conda_condabin = "/opt/conda/condabin"
+            conda_root_bin = "/opt/conda/bin"
+            system_paths = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            conf.bin_path = f"{conda_env_bin}:{conda_condabin}:{conda_root_bin}:{system_paths}"
+
+            logger.info(f"LocalEnv bin_path set to: {conf.bin_path}")
+            logger.info(f"Using conda environment: {conda_env_name}")
+
+            env = LocalEnv(conf=conf)
+
+            # propagate typical knob settings
+            env.conf.extra_volumes = extra_volumes.copy()
+            if running_timeout_period is not None:
+                env.conf.running_timeout_period = running_timeout_period
+            if enable_cache is not None:
+                env.conf.enable_cache = enable_cache
+            return env
+
+        # Patch the function used by DataScienceScen via imported symbol
+        coder_conf_mod.get_ds_env = _mle_get_ds_env  # type: ignore[attr-defined]
+    except Exception as exc:
+        logger.warning(f"Failed to patch RD-Agent env; proceeding with defaults: {exc}")
 
 
 @dataclass
@@ -326,12 +389,21 @@ COMPETITION INSTRUCTIONS
 
 
 async def run_rd_loop(context: RuntimeContext) -> DataScienceRDLoop:
-    """Execute the RD-Agent data-science loop with time/step budgets."""
+    """Execute the RD-Agent loop and persist SOTA artifacts as they appear."""
     loop = DataScienceRDLoop(DS_RD_SETTING)
     total_seconds = str(max(context.time_limit_hours, 0) * 3600)
     if context.time_limit_hours > 0:
         RD_Agent_TIMER_wrapper.timer.reset(all_duration=total_seconds)
-    await loop.run(step_n=context.step_limit or None, all_duration=total_seconds)
+
+    # Start a background poller to snapshot SOTA mid-run so later cleanups
+    # inside the experiment workspaces cannot delete the best artifacts.
+    poll_task = asyncio.create_task(poll_and_persist_sota(loop, context, interval=5))
+    try:
+        await loop.run(step_n=context.step_limit or None, all_duration=total_seconds)
+    finally:
+        poll_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poll_task
     return loop
 
 
@@ -356,36 +428,148 @@ def export_submission(loop: Optional[DataScienceRDLoop], context: RuntimeContext
         logger.info(f"Submission copied from {candidate} to {submission_path}")
         return True
 
+    # Fallback: scan workspaces for the most recent submission.csv
+    try:
+        ws_root = RD_AGENT_SETTINGS.workspace_path
+        if ws_root and Path(ws_root).exists():
+            latest: Optional[Path] = None
+            latest_mtime: float = -1.0
+            for p in Path(ws_root).rglob("submission.csv"):
+                try:
+                    mtime = p.stat().st_mtime
+                except Exception:
+                    continue
+                if mtime > latest_mtime:
+                    latest_mtime = mtime
+                    latest = p
+            if latest is not None and latest.exists():
+                shutil.copy2(latest, submission_path)
+                logger.info(
+                    f"Submission copied from fallback {latest} to {submission_path}"
+                )
+                return True
+    except Exception as exc:  # pragma: no cover
+        logger.warning(f"Fallback search for submission failed: {exc}")
+
     submission_path.write_text("id,target\n0,0\n")
     logger.error("RD-Agent did not produce a submission; wrote placeholder.")
     return False
 
-
 def export_workspace(loop: Optional[DataScienceRDLoop], context: RuntimeContext) -> Optional[Path]:
-    """Grab RD-Agent's best experiment files for inspection."""
+    """Export only the SOTA experiment into code/sota for inspection."""
     if not loop or not getattr(loop, "trace", None):
         return None
     sota = getattr(loop.trace, "sota_exp_to_submit", None)
     if not sota or not getattr(sota, "experiment_workspace", None):
         return None
 
-    workspace = Path(sota.experiment_workspace.workspace_path)
-    target_dir = context.paths.code_dir / "best_experiment"
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
+    return persist_sota(context, sota)
+
+
+def _serialize_result_safe(result: Any) -> Any:
+    try:
+        if hasattr(result, "to_dict"):
+            return result.to_dict()
+        return json.loads(json.dumps(result, default=str))
+    except Exception:
+        try:
+            return str(result)
+        except Exception:
+            return None
+
+
+def persist_sota(context: RuntimeContext, sota: Any) -> Path:
+    """Persist SOTA experiment files into CODE_DIR/sota and copy its submission.
+
+    - Reconstruct files from the in-memory workspace (file_dict).
+    - Copy scores.csv and submission.csv from the workspace dir if they exist.
+    - Write manifest.json for traceability.
+    - Overwrite only when the experiment id changes (monotonic update).
+    """
+    exp_ws = getattr(sota, "experiment_workspace", None)
+    if not exp_ws:
+        return context.paths.code_dir
+
+    workspace = Path(exp_ws.workspace_path)
+    exp_id = workspace.name
+    target_dir = context.paths.code_dir / "sota"
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    for relative_path, content in sota.experiment_workspace.file_dict.items():
+    # Read existing manifest to detect duplicates
+    manifest_path = target_dir / "manifest.json"
+    last_id: Optional[str] = None
+    if manifest_path.exists():
+        try:
+            last = json.loads(manifest_path.read_text())
+            last_id = last.get("experiment_dir_name")
+        except Exception:
+            last_id = None
+
+    if last_id == exp_id:
+        return workspace
+
+    # Clean target dir before writing the new snapshot
+    if target_dir.exists():
+        for p in target_dir.iterdir():
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                with contextlib.suppress(Exception):
+                    p.unlink()
+
+    # Reconstruct files from RD-Agent's in-memory workspace snapshot
+    for relative_path, content in exp_ws.file_dict.items():
         file_path = target_dir / relative_path
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(content)
+        try:
+            file_path.write_text(content)
+        except TypeError:
+            # If content is bytes-like, write in binary
+            with open(file_path, "wb") as f:
+                f.write(content)  # type: ignore[arg-type]
 
+    # Copy common artifacts for context if they exist
     for name in ("scores.csv", "submission.csv"):
         src = workspace / name
         if src.exists():
             shutil.copy2(src, target_dir / name)
 
+    # Best-effort: also keep submission stable under SUBMISSION_DIR
+    submission_path = context.paths.submission_path
+    submission_src = workspace / "submission.csv"
+    if submission_src.exists():
+        submission_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(submission_src, submission_path)
+
+    # Write manifest for traceability
+    result = getattr(getattr(sota, "result", None), None)
+    manifest = {
+        "experiment_dir_name": exp_id,
+        "workspace_path": str(workspace),
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "result": _serialize_result_safe(getattr(sota, "result", None)),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    logger.info(f"Persisted SOTA snapshot to {target_dir} (exp={exp_id})")
     return workspace
+
+
+async def poll_and_persist_sota(loop: DataScienceRDLoop, context: RuntimeContext, interval: int = 5) -> None:
+    """Poll for SOTA updates and persist snapshots as soon as they appear."""
+    last_seen: Optional[str] = None
+    while True:
+        try:
+            sota = getattr(getattr(loop, "trace", None), "sota_exp_to_submit", None)
+            if sota and getattr(sota, "experiment_workspace", None):
+                workspace = Path(sota.experiment_workspace.workspace_path)
+                exp_id = workspace.name
+                if exp_id != last_seen:
+                    persist_sota(context, sota)
+                    last_seen = exp_id
+        except Exception as exc:
+            logger.debug(f"SOTA poller error (ignored): {exc}")
+        await asyncio.sleep(interval)
 
 
 def export_logs(context: RuntimeContext) -> None:
@@ -454,6 +638,7 @@ def main() -> int:
     ensure_directories(context)
     data_root = mirror_competition_data(context)
     configure_rd_agent(context, data_root)
+    _patch_rdagent_env_to_local_agent(context)
     initialize_instructions_path(context)
     patch_description_builder()
     description = build_mle_description(context)

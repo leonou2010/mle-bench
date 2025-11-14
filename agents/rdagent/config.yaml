@@ -1,6 +1,6 @@
 vars:
-  step_count: &step_count 10 # 500 steps
-  time_limit: &time_limit 900 # 15 minutes
+  step_count: &step_count 50 # Increased from 10 to allow more iterations
+  time_limit: &time_limit 3600 # Increased from 900 (15 min) to 3600 (1 hour)
 
 defaults: &defaults
   start: rdagent/start.sh
@@ -9,6 +9,7 @@ defaults: &defaults
   env_vars: &env_vars
     TIME_LIMIT_SECS: *time_limit
     STEP_LIMIT: *step_count
+    RDAGENT_FORCE_LOCAL_ENV: "1"
 
 rdagent:
   <<: *defaults
@@ -43,3 +44,81 @@ rdagent/dev:
     DS_SAMPLE_DATA_BY_LLM: "False"
     DS_SCEN: rdagent.scenarios.data_science.scen.DataScienceScen
     DS_USE_RAW_DESCRIPTION: "True"
+
+# A lighter preset that prioritizes speed and fewer tokens.
+# Use this target when you want faster turnaround at the expense of peak score.
+rdagent/light:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    <<: *env_vars
+    # Shorter runs by default
+    TIME_LIMIT_SECS: 900
+    STEP_LIMIT: 10
+
+    # Ensure local (conda) env without docker probing
+    RDAGENT_FORCE_LOCAL_ENV: "1"
+    DS_Coder_CoSTEER_env_type: "conda"
+
+    # Cheaper/faster LLMs
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    CHAT_MODEL: gpt-4o-mini
+    EMBEDDING_MODEL: text-embedding-3-small
+
+    # Data science scenario: do less work per loop
+    DS_LOCAL_DATA_PATH: /home/data
+    DS_CODER_ON_WHOLE_PIPELINE: "False"
+    DS_SAMPLE_DATA_BY_LLM: "False"
+    DS_USE_RAW_DESCRIPTION: "False"
+    DS_CODER_MAX_LOOP: "3"
+    DS_RUNNER_MAX_LOOP: "1"
+    DS_ENABLE_LOG_ARCHIVE: "False"
+    DS_SCEN: rdagent.scenarios.data_science.scen.DataScienceScen
+    # Faster I/O and logs
+    LITELLM_CHAT_STREAM: "False"
+    LITELLM_LOG_LLM_CHAT_CONTENT: "False"
+
+# A medium preset for a more thorough check (≈30 min).
+rdagent/medium:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    <<: *env_vars
+    TIME_LIMIT_SECS: 1800
+    STEP_LIMIT: 20
+    RDAGENT_FORCE_LOCAL_ENV: "1"
+    DS_Coder_CoSTEER_env_type: "conda"
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    CHAT_MODEL: gpt-4o-mini
+    EMBEDDING_MODEL: text-embedding-3-small
+    DS_LOCAL_DATA_PATH: /home/data
+    DS_CODER_ON_WHOLE_PIPELINE: "False"
+    DS_SAMPLE_DATA_BY_LLM: "False"
+    DS_USE_RAW_DESCRIPTION: "False"
+    DS_CODER_MAX_LOOP: "5"
+    DS_RUNNER_MAX_LOOP: "2"
+    DS_ENABLE_LOG_ARCHIVE: "False"
+    DS_SCEN: rdagent.scenarios.data_science.scen.DataScienceScen
+    LITELLM_CHAT_STREAM: "False"
+    LITELLM_LOG_LLM_CHAT_CONTENT: "False"
+
+# One-hour, 50-step preset (full pipeline)
+rdagent/1h50:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    <<: *env_vars
+    TIME_LIMIT_SECS: 3600
+    STEP_LIMIT: 50
+    RDAGENT_FORCE_LOCAL_ENV: "1"
+    DS_Coder_CoSTEER_env_type: "conda"
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    CHAT_MODEL: gpt-4o
+    EMBEDDING_MODEL: text-embedding-3-small
+    DS_LOCAL_DATA_PATH: /home/data
+    DS_CODER_ON_WHOLE_PIPELINE: "True"
+    DS_SAMPLE_DATA_BY_LLM: "False"
+    DS_USE_RAW_DESCRIPTION: "True"
+    DS_SCEN: rdagent.scenarios.data_science.scen.DataScienceScen
+    LITELLM_CHAT_STREAM: "False"
+    LITELLM_LOG_LLM_CHAT_CONTENT: "False"

@@ -60,7 +60,13 @@ def execute_agent(container: Container, agent: Agent, logger: logging.Logger):
     exit_code, output = container.exec_run(cmd, stream=True, user="nonroot")
 
     for chunk in output:
-        logger.info(f"[Container] {chunk.decode('utf-8').strip()}")
+        # Be robust to split/malformed UTF-8 sequences in streamed chunks
+        try:
+            line = chunk.decode("utf-8", errors="replace").strip()
+        except Exception:
+            # Last-resort safeguard; represent as repr of bytes
+            line = repr(chunk)
+        logger.info(f"[Container] {line}")
 
 
 def clean_up(container: Container, logger: logging.Logger, retain: bool = False) -> bool:
