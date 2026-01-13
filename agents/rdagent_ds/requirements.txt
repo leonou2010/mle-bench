@@ -1,0 +1,2 @@
+# RD-Agent is installed from local directory in Dockerfile
+# No additional requirements needed here

@@ -1,0 +1,183 @@
+vars:
+  step_count: &step_count 500
+  time_limit: &time_limit 86400 # 24 hrs
+
+defaults: &defaults
+  start: aide_local/start.sh
+  dockerfile: aide_local/Dockerfile
+  kwargs_type: omegaconf
+  env_vars: &env_vars
+    TIME_LIMIT_SECS: *time_limit
+    STEP_LIMIT: *step_count
+
+kwargs_common: &kwargs_common
+  agent.search.max_debug_depth: 20 # debug down a branch for up to 20 steps
+  agent.search.debug_prob: 1 # always debug when there's something to debug
+  exec.timeout: 32400 # 9 hours limit _per step_, to match max of kaggle.com
+  copy_data: False # use symbolic links
+
+aide_local:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: gpt-4o-2024-08-06
+    agent.feedback.model: gpt-4o-2024-08-06
+    agent.steps: *step_count
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+aide_local/dev:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: gpt-4o-2024-08-06
+    agent.feedback.model: gpt-4o-2024-08-06
+    agent.steps: 8
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+aide_local/o1-preview:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: o1-preview
+    agent.code.temp: 1
+    agent.feedback.model: gpt-4o-2024-08-06
+    agent.steps: *step_count
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+aide_local/gpt-4-turbo:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: gpt-4-turbo-2024-04-09
+    agent.feedback.model: gpt-4-turbo-2024-04-09
+    agent.steps: *step_count
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+aide_local/gpt-4-turbo-dev:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: gpt-4-turbo-2024-04-09
+    agent.feedback.model: gpt-4-turbo-2024-04-09
+    agent.steps: 8
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+aide_local/gpt-3.5-turbo-0125:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: gpt-3.5-turbo-0125
+    agent.feedback.model: gpt-3.5-turbo-0125
+    agent.steps: *step_count
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+aide_local/gpt-3.5-dev:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: gpt-3.5-turbo-0125
+    agent.feedback.model: gpt-3.5-turbo-0125
+    agent.steps: 8
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+aide_local/claude-3-5-sonnet:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: claude-3-5-sonnet-20240620
+    agent.feedback.model: gpt-4o-2024-08-06
+    agent.steps: *step_count
+  env_vars:
+    <<: *env_vars
+    ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+aide_local/llama-3.1-405b-instruct:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: meta-llama/llama-3.1-405b-instruct
+    agent.feedback.model: gpt-4o-2024-08-06
+    agent.steps: *step_count
+  env_vars:
+    <<: *env_vars
+    OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+aide_local/gemini-1.5-pro:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: gemini-1.5-pro-002
+    agent.feedback.model: gpt-4o-2024-08-06
+    agent.steps: *step_count
+  env_vars:
+    <<: *env_vars
+    GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+aide_local/obfuscated:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: gpt-4o-2024-08-06
+    agent.feedback.model: gpt-4o-2024-08-06
+    agent.steps: *step_count
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    OBFUSCATE: "true"
+
+# Experiment variations based on AIDE features
+aide_local/post-search-on:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: gpt-4o-2024-08-06
+    agent.feedback.model: gpt-4o-2024-08-06
+    agent.steps: *step_count
+    post_search.selection: elite_maximin
+    post_search.top_k: 50
+    post_search.elite_top_k: 3
+    post_search.elite_ratio: 0.05
+    post_search.elite_k_std: 2.0
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+aide_local/plan-constraints:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: gpt-4o-2024-08-06
+    agent.feedback.model: gpt-4o-2024-08-06
+    agent.steps: *step_count
+    plan_constraints.enabled: True
+    plan_constraints.max_sentences: 5
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+aide_local/bug-consultant:
+  <<: *defaults
+  kwargs:
+    <<: *kwargs_common
+    agent.code.model: gpt-4o-2024-08-06
+    agent.feedback.model: gpt-4o-2024-08-06
+    agent.steps: *step_count
+    agent.search.use_bug_consultant: True
+    agent.search.bug_context_mode: consultant
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

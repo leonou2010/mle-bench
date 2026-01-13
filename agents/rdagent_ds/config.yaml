@@ -1,0 +1,72 @@
+vars:
+  time_limit: &time_limit 86400 # 24 hrs
+
+defaults: &defaults
+  start: rdagent_ds/start.sh
+  dockerfile: rdagent_ds/Dockerfile
+  kwargs_type: omegaconf
+  env_vars: &env_vars
+    TIME_LIMIT_SECS: *time_limit
+
+rdagent_ds:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    DS_ENABLE_KNOWLEDGE_BASE: "false"
+
+rdagent_ds/dev:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    TIME_LIMIT_SECS: 3600  # 1 hour for dev testing
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    DS_ENABLE_KNOWLEDGE_BASE: "false"
+
+rdagent_ds/kb-on:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    DS_ENABLE_KNOWLEDGE_BASE: "true"
+
+rdagent_ds/kb-off:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    DS_ENABLE_KNOWLEDGE_BASE: "false"
+
+# Experiment variations (matching RD-Agent's `rdagent/experiemnt/README.md`)
+rdagent_ds/post-search-on:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    DS_ENABLE_KNOWLEDGE_BASE: "false"
+    DS_SOTA_EXP_SELECTOR_NAME: "rdagent.scenarios.data_science.proposal.exp_gen.select.submit.CVFoldsRobustSOTASelector"
+    DS_POST_SEARCH_SELECTION: "elite_maximin"
+
+rdagent_ds/plan-constraints:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    DS_ENABLE_KNOWLEDGE_BASE: "false"
+    DS_PLAN_CONSTRAINTS_ENABLED: "true"
+    DS_PLAN_CONSTRAINTS_MAX_SENTENCES: "5"
+
+rdagent_ds/bug-consultant:
+  <<: *defaults
+  kwargs: {}
+  env_vars:
+    <<: *env_vars
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    DS_ENABLE_KNOWLEDGE_BASE: "false"
+    DS_USE_BUG_CONSULTANT: "true"
+    DS_BUG_CONTEXT_MODE: "consultant"
