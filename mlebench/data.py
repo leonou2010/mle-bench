@@ -8,7 +8,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-import diskcache as dc
+try:
+    import diskcache as dc  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    dc = None
 import pandas as pd
 import yaml
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_fixed
@@ -26,7 +29,10 @@ from mlebench.utils import (
 )
 
 logger = get_logger(__name__)
-cache = dc.Cache("cache", size_limit=2**26)  # 64 MB
+if dc is None:  # pragma: no cover
+    cache: dict[Any, Any] = {}
+else:
+    cache = dc.Cache("cache", size_limit=2**26)  # 64 MB
 
 
 def create_prepared_dir(competition: Competition) -> None:
@@ -50,36 +56,78 @@ def download_and_prepare_dataset(
         competition.prepare_fn
     ), f"Provided `prepare_fn` doesn't take arguments `raw`, `private` and `public`!"
 
-    ensure_leaderboard_exists(competition, force=overwrite_leaderboard)
+    try:
+        ensure_leaderboard_exists(competition, force=overwrite_leaderboard)
+    except Exception as e:
+        # Leaderboards are only required for medal thresholds/ranking; preparing the dataset
+        # (public/private split + answers) can still proceed without it.
+        logger.warning(f"Skipping leaderboard download for `{competition.id}`: {e}")
 
     competition_dir = competition.raw_dir.parent
 
     competition.raw_dir.mkdir(exist_ok=True, parents=True)
     create_prepared_dir(competition)
 
-    zipfile = download_dataset(
-        competition_id=competition.id,
-        download_dir=competition_dir,
-        force=False,
-    )
+    zipfile: Path | None = None
+    actual_zip_checksum: str | None = None
+
+    # If raw data already exists, don't force a Kaggle download.
+    if is_empty(competition.raw_dir):
+        zipfile = download_dataset(
+            competition_id=competition.kaggle_id,
+            download_dir=competition_dir,
+            force=False,
+        )
+    else:
+        zip_files = sorted(competition_dir.glob("*.zip"))
+        if len(zip_files) == 1:
+            zipfile = zip_files[0]
+        elif len(zip_files) > 1:
+            logger.warning(
+                f"Found multiple zip files in `{competition_dir}`; skipping zip verification and using raw data as-is."
+            )
 
     if overwrite_checksums or not skip_verification:
-        logger.info(f"Generating checksum for `{zipfile}`...")
-        actual_zip_checksum = get_checksum(zipfile)
-
+        expected_checksums = None
         if competition.checksums.is_file() and not overwrite_checksums:
             expected_checksums = load_yaml(competition.checksums)
-            expected_zip_checksum = expected_checksums["zip"]
 
-            if actual_zip_checksum != expected_zip_checksum:
-                raise ValueError(
-                    f"Checksum for `{zipfile}` does not match the expected checksum! "
-                    f"Expected `{expected_zip_checksum}` but got `{actual_zip_checksum}`."
-                )
+        if zipfile is not None and zipfile.is_file():
+            logger.info(f"Generating checksum for `{zipfile}`...")
+            zip_checksum_fn = get_checksum
+            if (
+                isinstance(expected_checksums, dict)
+                and "zip" in expected_checksums
+                and isinstance(expected_checksums["zip"], str)
+                and _try_infer_checksum_algorithm(expected_checksums["zip"]) == "sha256"
+            ):
+                zip_checksum_fn = get_checksum_sha256
+            actual_zip_checksum = zip_checksum_fn(zipfile)
 
-            logger.info(f"Checksum for `{zipfile}` matches the expected checksum.")
+            if (
+                isinstance(expected_checksums, dict)
+                and "zip" in expected_checksums
+                and isinstance(expected_checksums["zip"], str)
+            ):
+                expected_zip_checksum = expected_checksums["zip"]
+
+                if actual_zip_checksum != expected_zip_checksum:
+                    raise ValueError(
+                        f"Checksum for `{zipfile}` does not match the expected checksum! "
+                        f"Expected `{expected_zip_checksum}` but got `{actual_zip_checksum}`."
+                    )
+
+                logger.info(f"Checksum for `{zipfile}` matches the expected checksum.")
+        elif isinstance(expected_checksums, dict) and "zip" in expected_checksums:
+            logger.warning(
+                f"Checksums for `{competition.id}` expect a zip file, but none was found in `{competition_dir}`; skipping zip verification."
+            )
 
     if is_empty(competition.raw_dir):
+        if zipfile is None:
+            raise FileNotFoundError(
+                f"Raw data directory `{competition.raw_dir}` is empty and no zip file is available to extract."
+            )
         logger.info(f"Extracting `{zipfile}` to `{competition.raw_dir}`...")
         extract(zipfile, competition.raw_dir, recursive=False)
         logger.info(f"Extracted `{zipfile}` to `{competition.raw_dir}` successfully.")
@@ -110,35 +158,107 @@ def download_and_prepare_dataset(
         f.write(competition.description)
 
     if overwrite_checksums or not skip_verification:
-        logger.info(f"Generating checksums for files in `{competition_dir}`...")
+        expected_checksums = None
+        if competition.checksums.is_file() and not overwrite_checksums:
+            expected_checksums = load_yaml(competition.checksums)
 
-        actual_checksums = {
-            "zip": actual_zip_checksum,
-            "public": generate_checksums(competition.public_dir),
-            "private": generate_checksums(competition.private_dir),
-        }
+        if not skip_verification and isinstance(expected_checksums, dict) and not overwrite_checksums:
+            if "zip" in expected_checksums:
+                # Standard MLE-bench schema: {zip, public, private}
+                if zipfile is None or not zipfile.is_file():
+                    logger.warning(
+                        f"Checksums for `{competition.id}` expect a zip file, but none was found in `{competition_dir}`; skipping checksum verification."
+                    )
+                else:
+                    zip_algo = _try_infer_checksum_algorithm(expected_checksums.get("zip")) or "md5"
+                    zip_checksum_fn = get_checksum_sha256 if zip_algo == "sha256" else get_checksum
+                    zip_checksum = (
+                        actual_zip_checksum if actual_zip_checksum is not None else zip_checksum_fn(zipfile)
+                    )
 
-        if not competition.checksums.is_file() or overwrite_checksums:
-            with open(competition.checksums, "w") as file:
-                yaml.dump(actual_checksums, file, default_flow_style=False)
+                    public_algo = _try_infer_checksum_algorithm(expected_checksums.get("public")) or zip_algo
+                    private_algo = _try_infer_checksum_algorithm(expected_checksums.get("private")) or zip_algo
 
-            logger.info(f"Checksums for `{competition.id}` saved to `{competition.checksums}`.")
+                    actual_checksums: dict[str, Any] = {
+                        "zip": zip_checksum,
+                        "public": generate_checksums(competition.public_dir, algorithm=public_algo),
+                        "private": generate_checksums(competition.private_dir, algorithm=private_algo),
+                    }
 
-        expected_checksums = load_yaml(competition.checksums)
+                    if actual_checksums != expected_checksums:
+                        logger.error(f"Checksums do not match for `{competition.id}`!")
+                        diff = get_diff(
+                            actual_checksums,
+                            expected_checksums,
+                            fromfile="actual_checksums",
+                            tofile="expected_checksums",
+                        )
+                        raise ValueError(f"Checksums do not match for `{competition.id}`!\n{diff}")
+                    logger.info(
+                        f"Checksums for files in `{competition_dir}` match the expected checksums."
+                    )
+            elif "raw" in expected_checksums:
+                # Offline/local schema: {raw, public, private}
+                raw_algo = _try_infer_checksum_algorithm(expected_checksums.get("raw")) or "md5"
+                public_algo = _try_infer_checksum_algorithm(expected_checksums.get("public")) or raw_algo
+                private_algo = _try_infer_checksum_algorithm(expected_checksums.get("private")) or raw_algo
 
-        if actual_checksums != expected_checksums:
-            logger.error(f"Checksums do not match for `{competition.id}`!")
+                actual_checksums = {
+                    "raw": generate_checksums(competition.raw_dir, algorithm=raw_algo),
+                    "public": generate_checksums(competition.public_dir, algorithm=public_algo),
+                    "private": generate_checksums(competition.private_dir, algorithm=private_algo),
+                }
 
-            diff = get_diff(
-                actual_checksums,
-                expected_checksums,
-                fromfile="actual_checksums",
-                tofile="expected_checksums",
-            )
+                if actual_checksums != expected_checksums:
+                    logger.error(f"Checksums do not match for `{competition.id}`!")
+                    diff = get_diff(
+                        actual_checksums,
+                        expected_checksums,
+                        fromfile="actual_checksums",
+                        tofile="expected_checksums",
+                    )
+                    raise ValueError(f"Checksums do not match for `{competition.id}`!\n{diff}")
+                logger.info(
+                    f"Checksums for files in `{competition_dir}` match the expected checksums."
+                )
+            else:
+                # Legacy schema: checksums for raw files only.
+                raw_algo = _try_infer_checksum_algorithm(expected_checksums) or "md5"
+                raw_checksums = generate_checksums(competition.raw_dir, algorithm=raw_algo)
+                if raw_checksums != expected_checksums:
+                    logger.error(f"Raw checksums do not match for `{competition.id}`!")
+                    diff = get_diff(
+                        raw_checksums,
+                        expected_checksums,
+                        fromfile="actual_raw_checksums",
+                        tofile="expected_raw_checksums",
+                    )
+                    raise ValueError(f"Raw checksums do not match for `{competition.id}`!\n{diff}")
+                logger.info(
+                    f"Raw checksums for files in `{competition.raw_dir}` match the expected checksums."
+                )
+        else:
+            logger.info(f"Generating checksums for files in `{competition_dir}`...")
 
-            raise ValueError(f"Checksums do not match for `{competition.id}`!\n{diff}")
+            # Default to MD5 for backward compatibility when writing checksums.
+            actual_checksums = {
+                "public": generate_checksums(competition.public_dir),
+                "private": generate_checksums(competition.private_dir),
+            }
 
-        logger.info(f"Checksums for files in `{competition_dir}` match the expected checksums.")
+            if zipfile is not None and zipfile.is_file() and actual_zip_checksum is not None:
+                actual_checksums["zip"] = actual_zip_checksum
+            elif zipfile is not None and zipfile.is_file():
+                actual_checksums["zip"] = get_checksum(zipfile)
+            else:
+                # Local/offline datasets may not have a Kaggle zip; fall back to checksumming the raw CSVs.
+                actual_checksums["raw"] = generate_checksums(competition.raw_dir)
+
+            if not competition.checksums.is_file() or overwrite_checksums:
+                with open(competition.checksums, "w") as file:
+                    yaml.dump(actual_checksums, file, default_flow_style=False)
+
+                logger.info(f"Checksums for `{competition.id}` saved to `{competition.checksums}`.")
 
     if not keep_raw:
         logger.info(f"Removing the raw data directory for `{competition.id}`...")
@@ -187,10 +307,33 @@ def is_dataset_prepared(competition: Competition, grading_only: bool = False) ->
 
 
 def is_api_exception(exception: Exception) -> bool:
-    # only import when necessary; otherwise kaggle asks for API key on import
-    from kaggle.rest import ApiException
+    """
+    Return True if the exception looks like a Kaggle API transient error.
 
-    return isinstance(exception, ApiException)
+    Kaggle's Python client has changed over time; older versions exposed
+    `kaggle.rest.ApiException`, newer versions raise `requests.exceptions.HTTPError`
+    (via kagglesdk). This helper must not hard-import optional modules.
+    """
+    try:
+        # Older kaggle client.
+        from kaggle.rest import ApiException  # type: ignore
+
+        if isinstance(exception, ApiException):
+            return True
+    except Exception:
+        pass
+
+    try:
+        from requests import HTTPError  # type: ignore
+
+        if isinstance(exception, HTTPError):
+            # Retry on common transient codes (429/5xx).
+            status = getattr(getattr(exception, "response", None), "status_code", None)
+            return status in (429, 500, 502, 503, 504)
+    except Exception:
+        pass
+
+    return False
 
 
 @retry(
@@ -214,9 +357,6 @@ def download_dataset(
 
     api = authenticate_kaggle_api()
 
-    # only import when necessary; otherwise kaggle asks for API key on import
-    from kaggle.rest import ApiException
-
     try:
         api.competition_download_files(
             competition=competition_id,
@@ -224,13 +364,13 @@ def download_dataset(
             quiet=quiet,
             force=force,
         )
-    except ApiException as e:
+    except Exception as e:
         if _need_to_accept_rules(str(e)):
             logger.warning("You must accept the competition rules before downloading the dataset.")
             _prompt_user_to_accept_rules(competition_id)
             download_dataset(competition_id, download_dir, quiet, force)
         else:
-            raise e
+            raise
 
     zip_files = list(download_dir.glob("*.zip"))
 
@@ -275,6 +415,7 @@ def generate_checksums(
     target_dir: Path,
     exts: Optional[list[str]] = None,
     exclude: Optional[list[Path]] = None,
+    algorithm: str = "md5",
 ) -> dict:
     """
     Generate checksums for the files directly under the target directory with the specified extensions.
@@ -294,7 +435,13 @@ def generate_checksums(
     if exclude is None:
         exclude = []
 
-    checksums = {}
+    checksums: dict[str, str] = {}
+    if algorithm == "md5":
+        checksum_fn = get_checksum
+    elif algorithm == "sha256":
+        checksum_fn = get_checksum_sha256
+    else:
+        raise ValueError(f"Unsupported checksum algorithm: {algorithm!r}")
 
     for ext in exts:
         fpaths = target_dir.glob(f"*.{ext}")
@@ -306,7 +453,7 @@ def generate_checksums(
             if fpath in exclude:
                 continue
 
-            checksums[fpath.name] = get_checksum(fpath)
+            checksums[fpath.name] = checksum_fn(fpath)
 
     return checksums
 
@@ -367,6 +514,55 @@ def get_checksum(fpath: Path) -> str:
     return hash_md5.hexdigest()
 
 
+@file_cache
+def get_checksum_sha256(fpath: Path) -> str:
+    """Compute SHA-256 checksum of a file."""
+
+    assert fpath.is_file(), f"Expected a file at `{fpath}`, but it doesn't exist."
+
+    hash_sha256 = hashlib.sha256()
+    file_size = os.path.getsize(fpath)
+
+    # only show progress bar for large files (> ~5 GB)
+    show_progress = file_size > 5_000_000_000
+
+    with open(fpath, "rb") as f:
+        for chunk in tqdm(
+            iter(lambda: f.read(4_096), b""),
+            total=file_size // 4096,
+            unit="B",
+            unit_scale=True,
+            disable=not show_progress,
+        ):
+            hash_sha256.update(chunk)
+
+    return hash_sha256.hexdigest()
+
+
+def _try_infer_checksum_algorithm(expected_checksums: Any) -> str | None:
+    """
+    Best-effort inference for expected checksum algorithm based on checksum string length.
+
+    - MD5: 32 hex chars
+    - SHA-256: 64 hex chars
+    """
+
+    if isinstance(expected_checksums, str):
+        if len(expected_checksums) == 32:
+            return "md5"
+        if len(expected_checksums) == 64:
+            return "sha256"
+        return None
+
+    if isinstance(expected_checksums, dict):
+        for v in expected_checksums.values():
+            inferred = _try_infer_checksum_algorithm(v)
+            if inferred is not None:
+                return inferred
+
+    return None
+
+
 def ensure_leaderboard_exists(competition: Competition, force: bool = False) -> Path:
     """
     Ensures the leaderboard for a given competition exists in the competition's
@@ -384,18 +580,77 @@ def ensure_leaderboard_exists(competition: Competition, force: bool = False) -> 
                 f"Leaderboard not found locally for competition `{competition.id}`. Please flag this to the developers."
             )
     api = authenticate_kaggle_api()
-    leaderboard = api.competition_leaderboard_view(competition=competition.id)
-    if leaderboard:
-        leaderboard = [row.__dict__ for row in leaderboard]
-        leaderboard_df = pd.DataFrame(leaderboard)
-        leaderboard_df.drop(columns=["teamNameNullable", "teamName"], inplace=True)
+    try:
+        # Prefer fetching the full leaderboard (pagination) so medal thresholds are meaningful.
+        # Tunable via env vars to avoid extremely large downloads.
+        page_size = int(os.environ.get("MLEBENCH_LEADERBOARD_PAGE_SIZE", "200") or "200")
+        max_pages_env = os.environ.get("MLEBENCH_LEADERBOARD_MAX_PAGES", "").strip()
+        max_pages = int(max_pages_env) if max_pages_env else 0  # 0 = no cap
+
+        from kagglesdk.competitions.types.competition_api_service import ApiGetLeaderboardRequest
+
+        submissions = []
+        page_token: str | None = None
+        seen_tokens: set[str | None] = set()
+
+        with api.build_kaggle_client() as kaggle:
+            page = 0
+            while True:
+                if page_token in seen_tokens:
+                    raise RuntimeError("Leaderboard pagination token repeated; aborting to avoid infinite loop.")
+                seen_tokens.add(page_token)
+
+                req = ApiGetLeaderboardRequest()
+                req.competition_name = competition.kaggle_id
+                req.page_size = page_size
+                if page_token:
+                    req.page_token = page_token
+
+                resp = kaggle.competitions.competition_api_client.get_leaderboard(req)
+                page_subs = resp.submissions or []
+                submissions.extend(page_subs)
+
+                page += 1
+                page_token = resp.next_page_token or None
+
+                if max_pages and page >= max_pages:
+                    logger.warning(
+                        "Reached MLEBENCH_LEADERBOARD_MAX_PAGES=%s for `%s` (rows=%s).",
+                        max_pages,
+                        competition.id,
+                        len(submissions),
+                    )
+                    break
+                if not page_token:
+                    break
+
+        if not submissions:
+            raise RuntimeError(f"Failed to download leaderboard for competition `{competition.id}` (no rows).")
+
+        rows = [row.__dict__ for row in submissions]
+        leaderboard_df = pd.DataFrame(rows)
+        # Kaggle has changed these columns over time; drop if present.
+        leaderboard_df.drop(columns=["teamNameNullable", "teamName"], inplace=True, errors="ignore")
+
         leaderboard_df.to_csv(leaderboard_path, index=False)
         logger.info(
             f"Downloaded leaderboard for competition `{competition.id}` to `{download_dir.relative_to(Path.cwd()) / 'leaderboard.csv'}`."
         )
         return leaderboard_path
-    else:
-        raise RuntimeError(f"Failed to download leaderboard for competition `{competition.id}`.")
+    except Exception as e:
+        # Fallback to the older (first-page only) behavior.
+        logger.warning("Full leaderboard download failed for `%s` (%s); falling back to first page only.", competition.id, e)
+        leaderboard = api.competition_leaderboard_view(competition=competition.kaggle_id)
+        if leaderboard:
+            leaderboard = [row.__dict__ for row in leaderboard]
+            leaderboard_df = pd.DataFrame(leaderboard)
+            leaderboard_df.drop(columns=["teamNameNullable", "teamName"], inplace=True, errors="ignore")
+            leaderboard_df.to_csv(leaderboard_path, index=False)
+            logger.info(
+                f"Downloaded leaderboard for competition `{competition.id}` to `{download_dir.relative_to(Path.cwd()) / 'leaderboard.csv'}`."
+            )
+            return leaderboard_path
+        raise RuntimeError(f"Failed to download leaderboard for competition `{competition.id}`.") from e
 
 
 def get_leaderboard(competition: Competition) -> pd.DataFrame:
@@ -403,5 +658,29 @@ def get_leaderboard(competition: Competition) -> pd.DataFrame:
     assert (
         leaderboard_path.exists()
     ), f"Leaderboard not found locally for competition `{competition.id}`."
+    try:
+        with open(leaderboard_path, "r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+        if first_line.startswith("version https://git-lfs.github.com/spec/v1"):
+            raise FileNotFoundError(
+                f"Leaderboard for `{competition.id}` is a Git LFS pointer file. "
+                "Run `git lfs pull` to fetch it (or skip leaderboard-based ranking)."
+            )
+    except UnicodeDecodeError:
+        # If it's not UTF-8, let pandas handle / error below.
+        pass
     leaderboard_df = pd.read_csv(leaderboard_path)
+    if "score" not in leaderboard_df.columns:
+        score_col = None
+        for col in leaderboard_df.columns:
+            if col.strip().lower().lstrip("_") == "score":
+                score_col = col
+                break
+        if score_col is None:
+            for col in leaderboard_df.columns:
+                if "score" in col.strip().lower():
+                    score_col = col
+                    break
+        if score_col is not None and score_col != "score":
+            leaderboard_df = leaderboard_df.rename(columns={score_col: "score"})
     return leaderboard_df

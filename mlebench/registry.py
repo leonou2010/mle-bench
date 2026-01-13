@@ -1,8 +1,13 @@
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Callable
 
-from appdirs import user_cache_dir
+try:
+    from appdirs import user_cache_dir  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    def user_cache_dir(*_args, **_kwargs) -> str:
+        return str(Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")))
 
 from mlebench.grade_helpers import Grader
 from mlebench.utils import get_logger, get_module_dir, get_repo_dir, import_fn, load_yaml
@@ -16,6 +21,8 @@ DEFAULT_DATA_DIR = (Path(user_cache_dir()) / "mle-bench" / "data").resolve()
 @dataclass(frozen=True)
 class Competition:
     id: str
+    # Kaggle competition slug used by the Kaggle API (may differ from `id`).
+    kaggle_id: str
     name: str
     description: str
     grader: Grader
@@ -32,6 +39,7 @@ class Competition:
 
     def __post_init__(self):
         assert isinstance(self.id, str), "Competition id must be a string."
+        assert isinstance(self.kaggle_id, str), "Competition kaggle_id must be a string."
         assert isinstance(self.name, str), "Competition name must be a string."
         assert isinstance(self.description, str), "Competition description must be a string."
         assert isinstance(self.grader, Grader), "Competition grader must be of type Grader."
@@ -42,6 +50,7 @@ class Competition:
         assert isinstance(self.checksums, Path), "Checksums must be a Path."
         assert isinstance(self.leaderboard, Path), "Leaderboard must be a Path."
         assert len(self.id) > 0, "Competition id cannot be empty."
+        assert len(self.kaggle_id) > 0, "Competition kaggle_id cannot be empty."
         assert len(self.name) > 0, "Competition name cannot be empty."
         assert len(self.description) > 0, "Competition description cannot be empty."
         assert len(self.competition_type) > 0, "Competition type cannot be empty."
@@ -53,6 +62,7 @@ class Competition:
         try:
             return Competition(
                 id=data["id"],
+                kaggle_id=data.get("kaggle_id") or data["id"],
                 name=data["name"],
                 description=data["description"],
                 grader=grader,
@@ -102,6 +112,7 @@ class Registry:
         return Competition.from_dict(
             {
                 **config,
+                "kaggle_id": config.get("kaggle_id") or config.get("kaggle_slug") or competition_id,
                 "description": description,
                 "answers": answers,
                 "sample_submission": sample_submission,

@@ -8,6 +8,7 @@ dummy | dummy | N/A
 [AIDE](https://www.weco.ai/blog/technical-report) | aide | https://github.com/thesofakillers/aideml
 [MLAgentBench](https://openreview.net/forum?id=1Fs1LvjYQW) | mlagentbench | https://github.com/JunShern/MLAgentBench
 [OpenHands](https://arxiv.org/abs/2407.16741) | opendevin | https://github.com/thesofakillers/OpenHands
+[RD-Agent (DS loop)](https://github.com/microsoft/RD-Agent) | rdagent_ds | local clone at `../RD-Agent` (see `agents/rdagent_ds/`)
 
 ## Prerequisites
 If you want to run these agents locally:
@@ -18,12 +19,7 @@ If you want to run these agents locally:
 To build an image for an agent with ID `<agent>`, run:
 
 ```bash
-export SUBMISSION_DIR=/home/submission
-export LOGS_DIR=/home/logs
-export CODE_DIR=/home/code
-export AGENT_DIR=/home/agent
-
-docker build --platform=linux/amd64 -t <agent> agents/<agent>/ --build-arg SUBMISSION_DIR=$SUBMISSION_DIR --build-arg LOGS_DIR=$LOGS_DIR --build-arg CODE_DIR=$CODE_DIR --build-arg AGENT_DIR=$AGENT_DIR
+./build_agent.sh <agent>
 ```
 
 ## Running agents
@@ -45,6 +41,35 @@ You can then use the `mlebench grade` command to grade this submission:
 ```bash
 mlebench grade --submission runs/<run-group>/submission.jsonl --output-dir runs/<run-group>
 ```
+
+## RD-Agent experiment IDs
+
+The `rdagent_ds` wrapper exposes the 3 DS-loop experiments as separate agent IDs:
+
+- `rdagent_ds/post-search-on` (CV-fold robust post-search selection; saves per-method selections under `submission/selections/`)
+- `rdagent_ds/plan-constraints` (prompt-only plan constraints)
+- `rdagent_ds/bug-consultant` (debugging memory)
+
+To run all three across a split:
+
+```bash
+# No-Docker (native) runner:
+bash run_rdagent_native_experiments.sh experiments/splits/all.txt
+
+# Docker-based runner (uses `run_agent.py` + containers):
+# bash run_rdagent_experiments.sh experiments/splits/all.txt
+```
+
+Native runs require:
+- a sibling checkout at `../RD-Agent`
+- a conda env named `kaggle` (RD-Agent’s LocalEnv target)
+
+RD-Agent run artifacts include:
+- `trace_tree.html` + `trace_tree.png` inside the run’s log folder (native: `log/`, docker: `logs/rdagent/<competition_id>/`)
+- `submission/selections/selection_candidates.csv` (all runnable candidates + metrics)
+- `submission/selections/selection_results.csv` (which candidate each selection method picked)
+- `submission/selections/selection_summary.html` (clickable HTML summary + links to each method’s submission/logs)
+- `submission/selections/<method>/*` (selected `submission.csv` + `scores.csv`/`stdout.txt`/etc when available)
 
 If you'd like to update the configuration of the container, you can edit the default container config in `environment/config/container_configs/default.json`, or specify a custom container config JSON file when executing `run_agent.py`. If you'd like to run the agent with a GPU, you can set `"gpus": -1` in the container config JSON file.
 

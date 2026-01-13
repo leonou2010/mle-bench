@@ -1,5 +1,6 @@
 """High-level grading functionality"""
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -71,9 +72,26 @@ def grade_csv(path_to_submission: Path, competition: Competition) -> Competition
         )
 
     valid_submission = score is not None
-    competition_leaderboard = get_leaderboard(competition)
-    rank_info = competition.grader.rank_score(score, competition_leaderboard)
-    is_lower_better = competition.grader.is_lower_better(competition_leaderboard)
+    rank_info = {
+        "gold_threshold": math.nan,
+        "silver_threshold": math.nan,
+        "bronze_threshold": math.nan,
+        "median_threshold": math.nan,
+        "gold_medal": False,
+        "silver_medal": False,
+        "bronze_medal": False,
+        "above_median": False,
+    }
+    is_lower_better = False
+
+    try:
+        competition_leaderboard = get_leaderboard(competition)
+        rank_info = competition.grader.rank_score(score, competition_leaderboard)
+        is_lower_better = competition.grader.is_lower_better(competition_leaderboard)
+    except Exception as e:
+        logger.warning(
+            f"Skipping leaderboard-based ranking for `{competition.id}` (score computed): {e}"
+        )
 
     return CompetitionReport(
         competition_id=competition.id,

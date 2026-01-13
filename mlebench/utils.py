@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import pandas as pd
-import py7zr
 import yaml
 from pandas import DataFrame
 from tqdm.auto import tqdm
@@ -172,6 +171,12 @@ def compress(src: Path, compressed: Path, exist_ok: bool = False) -> None:
                 zipf.write(file_path, arcname=file_path.relative_to(src))
 
     def sevenz_compress(src: Path, compressed: Path):
+        try:
+            import py7zr  # type: ignore
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "py7zr is required to create .7z archives. Install it or use .zip instead."
+            ) from e
         with py7zr.SevenZipFile(compressed, "w") as archive:
             for file_path in tqdm(file_paths, desc=tqdm_desc, unit="file", total=total_files):
                 archive.write(file_path, arcname=file_path.relative_to(src))
@@ -196,6 +201,12 @@ def extract(
     assert is_compressed(compressed), f"File `{compressed}` is not compressed."
 
     if compressed.suffix == ".7z":
+        try:
+            import py7zr  # type: ignore
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "py7zr is required to extract .7z archives. Install it or provide a .zip instead."
+            ) from e
         with py7zr.SevenZipFile(compressed, mode="r") as ref:
             ref.extractall(dst)
     elif compressed.suffix == ".zip":
