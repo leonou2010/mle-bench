@@ -121,6 +121,19 @@ def run_in_container(
         },
     }
 
+    # Bind-mount submission/logs/code dirs for real-time access on the host
+    for dir_type, container_path in [
+        ("submission", CONSTANTS["SUBMISSION_DIR"]),
+        ("logs", CONSTANTS["LOGS_DIR"]),
+        ("code", CONSTANTS["CODE_DIR"]),
+    ]:
+        host_dir = run_dir / dir_type
+        host_dir.mkdir(parents=True, exist_ok=True)
+        volumes_config[host_dir.resolve().as_posix()] = {
+            "bind": container_path,
+            "mode": "rw",
+        }
+
     container = create_competition_container(
         client=client,
         competition=competition,
